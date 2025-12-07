@@ -3,15 +3,16 @@ import sys
 import re
 import six
 import math
+import lmdb
 import torch
-import pandas  as pd
 
 from natsort import natsorted
 from PIL import Image
 import numpy as np
 from torch.utils.data import Dataset, ConcatDataset, Subset
-from torch._utils import _accumulate
+from itertools import accumulate as _accumulate
 import torchvision.transforms as transforms
+
 
 def contrast_grey(img):
     high = np.percentile(img, 90)
@@ -22,29 +23,24 @@ def adjust_contrast_grey(img, target = 0.4):
     contrast, high, low = contrast_grey(img)
     if contrast < target:
         img = img.astype(int)
-        ratio = 200./(high-low)
+        ratio = 200. /(high-low)
         img = (img - low + 25)*ratio
-        img = np.maximum(np.full(img.shape, 0) ,np.minimum(np.full(img.shape, 255), img)).astype(np.uint8)
+        img = np.maximum(np.full(img.shape, 0), np.minimum(np.full(img. shape, 255), img)). astype(np. uint8)
     return img
 
 
 class Batch_Balanced_Dataset(object):
 
     def __init__(self, opt):
-        """
-        Modulate the data ratio in the batch.
-        For example, when select_data is "MJ-ST" and batch_ratio is "0.5-0.5",
-        the 50% of the batch is filled with MJ and the other 50% of the batch is filled with ST.
-        """
         log = open(f'./saved_models/{opt.experiment_name}/log_dataset.txt', 'a')
         dashed_line = '-' * 80
         print(dashed_line)
         log.write(dashed_line + '\n')
         print(f'dataset_root: {opt.train_data}\nopt.select_data: {opt.select_data}\nopt.batch_ratio: {opt.batch_ratio}')
-        log.write(f'dataset_root: {opt.train_data}\nopt.select_data: {opt.select_data}\nopt.batch_ratio: {opt.batch_ratio}\n')
+        log. write(f'dataset_root: {opt.train_data}\nopt.select_data: {opt. select_data}\nopt.batch_ratio: {opt.batch_ratio}\n')
         assert len(opt.select_data) == len(opt.batch_ratio)
 
-        _AlignCollate = AlignCollate(imgH=opt.imgH, imgW=opt.imgW, keep_ratio_with_pad=opt.PAD, contrast_adjust = opt.contrast_adjust)
+        _AlignCollate = AlignCollate(imgH=opt.imgH, imgW=opt.imgW, keep_ratio_with_pad=opt. PAD, contrast_adjust=opt.contrast_adjust)
         self.data_loader_list = []
         self.dataloader_iter_list = []
         batch_size_list = []
@@ -57,11 +53,6 @@ class Batch_Balanced_Dataset(object):
             total_number_dataset = len(_dataset)
             log.write(_dataset_log)
 
-            """
-            The total number of data can be modified with opt.total_data_usage_ratio.
-            ex) opt.total_data_usage_ratio = 1 indicates 100% usage, and 0.2 indicates 20% usage.
-            See 4.2 section in our paper.
-            """
             number_dataset = int(total_number_dataset * float(opt.total_data_usage_ratio))
             dataset_split = [number_dataset, total_number_dataset - number_dataset]
             indices = range(total_number_dataset)
@@ -71,16 +62,16 @@ class Batch_Balanced_Dataset(object):
             selected_d_log += f'num samples of {selected_d} per batch: {opt.batch_size} x {float(batch_ratio_d)} (batch_ratio) = {_batch_size}'
             print(selected_d_log)
             log.write(selected_d_log + '\n')
-            batch_size_list.append(str(_batch_size))
+            batch_size_list. append(str(_batch_size))
             Total_batch_size += _batch_size
 
-            _data_loader = torch.utils.data.DataLoader(
+            _data_loader = torch. utils.data.DataLoader(
                 _dataset, batch_size=_batch_size,
                 shuffle=True,
-                num_workers=int(opt.workers), #prefetch_factor=2,persistent_workers=True,
+                num_workers=int(opt. workers),
                 collate_fn=_AlignCollate, pin_memory=True)
-            self.data_loader_list.append(_data_loader)
-            self.dataloader_iter_list.append(iter(_data_loader))
+            self.data_loader_list. append(_data_loader)
+            self. dataloader_iter_list.append(iter(_data_loader))
 
         Total_batch_size_log = f'{dashed_line}\n'
         batch_size_sum = '+'.join(batch_size_list)
@@ -98,12 +89,12 @@ class Batch_Balanced_Dataset(object):
 
         for i, data_loader_iter in enumerate(self.dataloader_iter_list):
             try:
-                image, text = data_loader_iter.next()
+                image, text = next(data_loader_iter)
                 balanced_batch_images.append(image)
                 balanced_batch_texts += text
             except StopIteration:
                 self.dataloader_iter_list[i] = iter(self.data_loader_list[i])
-                image, text = self.dataloader_iter_list[i].next()
+                image, text = next(self. dataloader_iter_list[i])
                 balanced_batch_images.append(image)
                 balanced_batch_texts += text
             except ValueError:
@@ -115,12 +106,11 @@ class Batch_Balanced_Dataset(object):
 
 
 def hierarchical_dataset(root, opt, select_data='/'):
-    """ select_data='/' contains all sub-directory of root directory """
     dataset_list = []
     dataset_log = f'dataset_root:    {root}\t dataset: {select_data[0]}'
     print(dataset_log)
     dataset_log += '\n'
-    for dirpath, dirnames, filenames in os.walk(root+'/'):
+    for dirpath, dirnames, filenames in os. walk(root+'/'):
         if not dirnames:
             select_flag = False
             for selected_d in select_data:
@@ -129,7 +119,7 @@ def hierarchical_dataset(root, opt, select_data='/'):
                     break
 
             if select_flag:
-                dataset = OCRDataset(dirpath, opt)
+                dataset = LmdbDataset(dirpath, opt)
                 sub_dataset_log = f'sub-directory:\t/{os.path.relpath(dirpath, root)}\t num samples: {len(dataset)}'
                 print(sub_dataset_log)
                 dataset_log += f'{sub_dataset_log}\n'
@@ -139,74 +129,133 @@ def hierarchical_dataset(root, opt, select_data='/'):
 
     return concatenated_dataset, dataset_log
 
-class OCRDataset(Dataset):
+
+class LmdbDataset(Dataset):
 
     def __init__(self, root, opt):
-
         self.root = root
         self.opt = opt
-        print(root)
-        self.df = pd.read_csv(os.path.join(root,'labels.csv'), sep='^([^,]+),', engine='python', usecols=['filename', 'words'], keep_default_na=False)
-        self.nSamples = len(self.df)
+        self.env = lmdb. open(root, max_readers=32, readonly=True, lock=False, readahead=False, meminit=False)
+        if not self.env:
+            print('cannot create lmdb from %s' % (root))
+            sys.exit(0)
 
-        if self.opt.data_filtering_off:
-            self.filtered_index_list = [index + 1 for index in range(self.nSamples)]
-        else:
-            self.filtered_index_list = []
-            for index in range(self.nSamples):
-                label = self.df.at[index,'words']
-                try:
+        with self.env. begin(write=False) as txn:
+            nSamples = int(txn.get('num-samples'. encode()))
+            self.nSamples = nSamples
+
+            if self.opt.data_filtering_off:
+                self. filtered_index_list = [index + 1 for index in range(self.nSamples)]
+            else:
+                self.filtered_index_list = []
+                for index in range(self.nSamples):
+                    index += 1
+                    label_key = 'label-%09d'. encode() % index
+                    label = txn.get(label_key). decode('utf-8')
+
                     if len(label) > self.opt.batch_max_length:
                         continue
-                except:
-                    print(label)
-                out_of_char = f'[^{self.opt.character}]'
-                if re.search(out_of_char, label.lower()):
-                    continue
-                self.filtered_index_list.append(index)
-            self.nSamples = len(self.filtered_index_list)
+
+                    out_of_char = f'[^{self.opt.character}]'
+                    if re.search(out_of_char, label. lower()):
+                        continue
+
+                    self.filtered_index_list.append(index)
+
+                self.nSamples = len(self.filtered_index_list)
 
     def __len__(self):
         return self.nSamples
 
     def __getitem__(self, index):
+        assert index <= len(self), 'index range error'
         index = self.filtered_index_list[index]
-        img_fname = self.df.at[index,'filename']
-        img_fpath = os.path.join(self.root, img_fname)
-        label = self.df.at[index,'words']
 
-        if self.opt.rgb:
-            img = Image.open(img_fpath).convert('RGB')  # for color image
-        else:
-            img = Image.open(img_fpath).convert('L')
+        with self.env.begin(write=False) as txn:
+            label_key = 'label-%09d'.encode() % index
+            label = txn. get(label_key).decode('utf-8')
+            img_key = 'image-%09d'.encode() % index
+            imgbuf = txn.get(img_key)
 
-        if not self.opt.sensitive:
-            label = label.lower()
+            buf = six.BytesIO()
+            buf.write(imgbuf)
+            buf.seek(0)
+            try:
+                if self.opt.rgb:
+                    img = Image.open(buf).convert('RGB')
+                else:
+                    img = Image.open(buf).convert('L')
 
-        # We only train and evaluate on alphanumerics (or pre-defined character set in train.py)
-        out_of_char = f'[^{self.opt.character}]'
-        label = re.sub(out_of_char, '', label)
+            except IOError:
+                print(f'Corrupted image for {index}')
+                if self.opt.rgb:
+                    img = Image.new('RGB', (self.opt.imgW, self.opt. imgH))
+                else:
+                    img = Image.new('L', (self. opt.imgW, self.opt.imgH))
+                label = '[dummy_label]'
+
+            if not self.opt.sensitive:
+                label = label.lower()
+
+            out_of_char = f'[^{self.opt.character}]'
+            label = re.sub(out_of_char, '', label)
 
         return (img, label)
+
+
+class RawDataset(Dataset):
+
+    def __init__(self, root, opt):
+        self.opt = opt
+        self.image_path_list = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            for name in filenames:
+                _, ext = os.path.splitext(name)
+                ext = ext.lower()
+                if ext == '.jpg' or ext == '.jpeg' or ext == '.png':
+                    self.image_path_list.append(os.path.join(dirpath, name))
+
+        self.image_path_list = natsorted(self.image_path_list)
+        self.nSamples = len(self.image_path_list)
+
+    def __len__(self):
+        return self.nSamples
+
+    def __getitem__(self, index):
+        try:
+            if self.opt.rgb:
+                img = Image.open(self.image_path_list[index]).convert('RGB')
+            else:
+                img = Image.open(self.image_path_list[index]). convert('L')
+
+        except IOError:
+            print(f'Corrupted image for {index}')
+            if self.opt.rgb:
+                img = Image.new('RGB', (self.opt.imgW, self.opt.imgH))
+            else:
+                img = Image.new('L', (self.opt. imgW, self. opt.imgH))
+
+        return (img, self.image_path_list[index])
+
 
 class ResizeNormalize(object):
 
     def __init__(self, size, interpolation=Image.BICUBIC):
         self.size = size
         self.interpolation = interpolation
-        self.toTensor = transforms.ToTensor()
+        self.toTensor = transforms. ToTensor()
 
     def __call__(self, img):
-        img = img.resize(self.size, self.interpolation)
+        img = img.resize(self. size, self.interpolation)
         img = self.toTensor(img)
-        img.sub_(0.5).div_(0.5)
+        img. sub_(0.5).div_(0.5)
         return img
 
 
 class NormalizePAD(object):
 
     def __init__(self, max_size, PAD_type='right'):
-        self.toTensor = transforms.ToTensor()
+        self. toTensor = transforms. ToTensor()
         self.max_size = max_size
         self.max_width_half = math.floor(max_size[2] / 2)
         self.PAD_type = PAD_type
@@ -216,16 +265,16 @@ class NormalizePAD(object):
         img.sub_(0.5).div_(0.5)
         c, h, w = img.size()
         Pad_img = torch.FloatTensor(*self.max_size).fill_(0)
-        Pad_img[:, :, :w] = img  # right pad
-        if self.max_size[2] != w:  # add border Pad
-            Pad_img[:, :, w:] = img[:, :, w - 1].unsqueeze(2).expand(c, h, self.max_size[2] - w)
+        Pad_img[:, :, :w] = img
+        if self.max_size[2] != w:
+            Pad_img[:, :, w:] = img[:, :, w - 1]. unsqueeze(2). expand(c, h, self.max_size[2] - w)
 
         return Pad_img
 
 
 class AlignCollate(object):
 
-    def __init__(self, imgH=32, imgW=100, keep_ratio_with_pad=False, contrast_adjust = 0.):
+    def __init__(self, imgH=32, imgW=100, keep_ratio_with_pad=False, contrast_adjust=0.):
         self.imgH = imgH
         self.imgW = imgW
         self.keep_ratio_with_pad = keep_ratio_with_pad
@@ -235,19 +284,18 @@ class AlignCollate(object):
         batch = filter(lambda x: x is not None, batch)
         images, labels = zip(*batch)
 
-        if self.keep_ratio_with_pad:  # same concept with 'Rosetta' paper
+        if self.keep_ratio_with_pad:
             resized_max_w = self.imgW
-            input_channel = 3 if images[0].mode == 'RGB' else 1
+            input_channel = 3 if images[0]. mode == 'RGB' else 1
             transform = NormalizePAD((input_channel, self.imgH, resized_max_w))
 
             resized_images = []
             for image in images:
                 w, h = image.size
 
-                #### augmentation here - change contrast
                 if self.contrast_adjust > 0:
-                    image = np.array(image.convert("L"))
-                    image = adjust_contrast_grey(image, target = self.contrast_adjust)
+                    image = np.array(image. convert("L"))
+                    image = adjust_contrast_grey(image, target=self.contrast_adjust)
                     image = Image.fromarray(image, 'L')
 
                 ratio = w / float(h)
@@ -256,11 +304,10 @@ class AlignCollate(object):
                 else:
                     resized_w = math.ceil(self.imgH * ratio)
 
-                resized_image = image.resize((resized_w, self.imgH), Image.BICUBIC)
+                resized_image = image. resize((resized_w, self.imgH), Image. BICUBIC)
                 resized_images.append(transform(resized_image))
-                # resized_image.save('./image_test/%d_test.jpg' % w)
 
-            image_tensors = torch.cat([t.unsqueeze(0) for t in resized_images], 0)
+            image_tensors = torch.cat([t. unsqueeze(0) for t in resized_images], 0)
 
         else:
             transform = ResizeNormalize((self.imgW, self.imgH))
