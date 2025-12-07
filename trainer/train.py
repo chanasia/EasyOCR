@@ -185,7 +185,7 @@ def train(opt, show_number = 2, amp=False):
 
                 if 'CTC' in opt.Prediction:
                     preds = model(image, text).log_softmax(2)
-                    preds_size = torch.IntTensor([preds.size(1)] * batch_size)
+                    preds_size = torch.IntTensor([preds.size(1)] * batch_size).to(device)
                     preds = preds.permute(1, 0, 2)
                     torch.backends.cudnn.enabled = False
                     cost = criterion(preds, text.to(device), preds_size.to(device), length.to(device))
@@ -206,7 +206,7 @@ def train(opt, show_number = 2, amp=False):
             batch_size = image.size(0)
             if 'CTC' in opt.Prediction:
                 preds = model(image, text).log_softmax(2)
-                preds_size = torch.IntTensor([preds.size(1)] * batch_size)
+                preds_size = torch.IntTensor([preds.size(1)] * batch_size).to(device)
                 preds = preds.permute(1, 0, 2)
                 torch.backends.cudnn.enabled = False
                 cost = criterion(preds, text.to(device), preds_size.to(device), length.to(device))
