@@ -13,7 +13,6 @@ import numpy as np
 from dataset import hierarchical_dataset, AlignCollate, Batch_Balanced_Dataset
 
 from utils import CTCLabelConverter, AttnLabelConverter, Averager
-# from dataset import hierarchical_dataset, AlignCollate, Batch_Balanced_Dataset
 from model import Model
 from validation import validation
 
@@ -26,7 +25,6 @@ def count_parameters(model):
     for name, parameter in model.named_parameters():
         if not parameter.requires_grad: continue
         param = parameter.numel()
-        # table.add_row([name, param])
         total_params += param
         print(name, param)
     print(f"Total Trainable Params: {total_params}")
@@ -34,7 +32,6 @@ def count_parameters(model):
 
 
 def train(opt, show_number=2, amp=False):
-    """ dataset preparation """
     if not opt.data_filtering_off:
         print('Filtering the images containing characters which are not in opt.character')
         print('Filtering the images whose label is longer than opt.batch_max_length')
@@ -51,7 +48,7 @@ def train(opt, show_number=2, amp=False):
     valid_dataset, valid_dataset_log = hierarchical_dataset(root=opt.valid_data, opt=opt)
     valid_loader = torch.utils.data.DataLoader(
         valid_dataset, batch_size=min(32, opt.batch_size),
-        shuffle=True,  # 'True' to check training progress with validation function.
+        shuffle=True,
         num_workers=int(opt.workers),
         collate_fn=AlignCollate_valid, pin_memory=True)
     log.write(valid_dataset_log)
@@ -59,7 +56,6 @@ def train(opt, show_number=2, amp=False):
     log.write('-' * 80 + '\n')
     log.close()
 
-    """ model configuration """
     if 'CTC' in opt.Prediction:
         converter = CTCLabelConverter(opt.character)
     else:
@@ -94,7 +90,6 @@ def train(opt, show_number=2, amp=False):
                     init.kaiming_normal_(param)
             model = model.to(device)
     else:
-        # weight initialization
         for name, param in model.named_parameters():
             if 'localization_fc2' in name:
                 print(f'Skip {name} as it is already initialized')
@@ -104,7 +99,7 @@ def train(opt, show_number=2, amp=False):
                     init.constant_(param, 0.0)
                 elif 'weight' in name:
                     init.kaiming_normal_(param)
-            except Exception as e:  # for batchnorm.
+            except Exception as e:
                 if 'weight' in name:
                     param.data.fill_(1)
                 continue
@@ -115,15 +110,12 @@ def train(opt, show_number=2, amp=False):
     print(model)
     count_parameters(model)
 
-    """ setup loss """
     if 'CTC' in opt.Prediction:
         criterion = torch.nn.CTCLoss(zero_infinity=True).to(device)
     else:
-        criterion = torch.nn.CrossEntropyLoss(ignore_index=0).to(device)  # ignore [GO] token = ignore index 0
-    # loss averager
+        criterion = torch.nn.CrossEntropyLoss(ignore_index=0).to(device)
     loss_avg = Averager()
 
-    # freeze some layers
     try:
         if opt.freeze_FeatureFxtraction:
             for param in model.module.FeatureExtraction.parameters():
@@ -134,26 +126,20 @@ def train(opt, show_number=2, amp=False):
     except:
         pass
 
-    # filter that only require gradient decent
     filtered_parameters = []
     params_num = []
     for p in filter(lambda p: p.requires_grad, model.parameters()):
         filtered_parameters.append(p)
         params_num.append(np.prod(p.size()))
     print('Trainable params num : ', sum(params_num))
-    # [print(name, p.numel()) for name, p in filter(lambda p: p[1].requires_grad, model.named_parameters())]
 
-    # setup optimizer
     if opt.optim == 'adam':
-        # optimizer = optim.Adam(filtered_parameters, lr=opt.lr, betas=(opt.beta1, 0.999))
         optimizer = optim.Adam(filtered_parameters)
     else:
         optimizer = optim.Adadelta(filtered_parameters, lr=opt.lr, rho=opt.rho, eps=opt.eps)
     print("Optimizer:")
     print(optimizer)
 
-    """ final options """
-    # print(opt)
     with open(f'./saved_models/{opt.experiment_name}/opt.txt', 'a', encoding="utf8") as opt_file:
         opt_log = '------------ Options -------------\n'
         args = vars(opt)
@@ -163,7 +149,6 @@ def train(opt, show_number=2, amp=False):
         print(opt_log)
         opt_file.write(opt_log)
 
-    """ start training """
     start_iter = 0
     if opt.saved_model != '':
         try:
@@ -181,6 +166,9 @@ def train(opt, show_number=2, amp=False):
     t1 = time.time()
 
     while (True):
+        if i % 100 == 0:
+            print(f'[Training] Iteration {i}/{opt.num_iter}, Current Loss: {loss_avg.val():.5f}', flush=True)
+
         optimizer.zero_grad(set_to_none=True)
 
         if amp:
@@ -235,6 +223,8 @@ def train(opt, show_number=2, amp=False):
         loss_avg.add(cost)
 
         if (i % opt.valInterval == 0) and (i != 0):
+            print(f'\n{"="*80}')
+            print(f'[Validation] Starting validation at iteration {i}...', flush=True)
             print('training time: ', time.time() - t1)
             t1 = time.time()
             elapsed_time = time.time() - start_time
@@ -253,10 +243,10 @@ def train(opt, show_number=2, amp=False):
 
                 if current_accuracy > best_accuracy:
                     best_accuracy = current_accuracy
-                    torch.save(model.state_dict(), f'/kaggle/working/best_accuracy.pth')
+                    torch.save(model.state_dict(), f'./saved_models/{opt.experiment_name}/best_accuracy.pth')
                 if current_norm_ED > best_norm_ED:
                     best_norm_ED = current_norm_ED
-                    torch.save(model.state_dict(), f'/kaggle/working/best_norm_ED.pth')
+                    torch.save(model.state_dict(), f'./saved_models/{opt.experiment_name}/best_norm_ED.pth')
                 best_model_log = f'{"Best_accuracy":17s}: {best_accuracy:0.3f}, {"Best_norm_ED":17s}: {best_norm_ED:0.4f}'
 
                 loss_model_log = f'{loss_log}\n{current_model_log}\n{best_model_log}'
@@ -279,6 +269,7 @@ def train(opt, show_number=2, amp=False):
                 print(predicted_result_log)
                 log.write(predicted_result_log + '\n')
                 print('validation time: ', time.time() - t1)
+                print(f'{"="*80}\n')
                 t1 = time.time()
 
         if (i + 1) % 1000 == 0:

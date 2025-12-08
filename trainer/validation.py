@@ -22,7 +22,20 @@ def validation(model, criterion, evaluation_loader, converter, opt, device):
     infer_time = 0
     valid_loss_avg = Averager()
 
+    total_batches = len(evaluation_loader)
+    print(f'[Validation] Total batches to process: {total_batches}', flush=True)
+    batch_start_time = time.time()
+
     for i, (image_tensors, labels) in enumerate(evaluation_loader):
+        if i % 10 == 0:
+            batch_time = time.time() - batch_start_time if i > 0 else 0
+            avg_time = batch_time / 10 if i > 0 else 0
+            eta = avg_time * (total_batches - i) if i > 0 else 0
+            print(
+                f'[Validation] Batch {i}/{total_batches} | Samples: {length_of_data} | Avg: {avg_time:.3f}s/batch | ETA: {eta / 60:.1f}min',
+                flush=True)
+            batch_start_time = time.time()
+
         batch_size = image_tensors.size(0)
         length_of_data = length_of_data + batch_size
         image = image_tensors.to(device)
@@ -96,6 +109,8 @@ def validation(model, criterion, evaluation_loader, converter, opt, device):
             except:
                 confidence_score = 0
             confidence_score_list.append(confidence_score)
+
+    print(f'[Validation] Completed! Total samples processed: {length_of_data}', flush=True)
 
     accuracy = n_correct / float(length_of_data) * 100
     norm_ED = norm_ED / float(length_of_data)
